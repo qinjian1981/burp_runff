@@ -258,7 +258,22 @@ public class BurpExtender implements BurpExtension, HttpHandler {
     private void createZipFile(String pathName,String folderName) {
         try {
             Path sourceFolderPath = Paths.get(pathName,folderName);
-            Path zipFilePath = Paths.get(pathName, folderName + ".zip");
+            
+            // 根据 pathName 生成不同的压缩包文件名和文件夹名
+            String zipFileName;
+            String folderDisplayName;
+            if ("runff".equals(pathName)) {
+                zipFileName = folderName + "_跑步维生素.zip";
+                folderDisplayName = folderName + "_跑步维生素";
+            } else if ("runnerbar".equals(pathName)) {
+                zipFileName = folderName + "_爱运动.zip";
+                folderDisplayName = folderName + "_爱运动";
+            } else {
+                zipFileName = folderName + ".zip";
+                folderDisplayName = folderName;
+            }
+            
+            Path zipFilePath = Paths.get(pathName, zipFileName);
             
             // 创建 ZIP 文件
             try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(
@@ -269,8 +284,8 @@ public class BurpExtender implements BurpExtension, HttpHandler {
                     .filter(path -> !Files.isDirectory(path))
                     .forEach(path -> {
                         try {
-                            // 计算相对路径
-                            String relativePath = sourceFolderPath.relativize(path).toString();
+                            // 计算相对路径，使用新的文件夹名称
+                            String relativePath = folderDisplayName + "/" + sourceFolderPath.relativize(path).toString();
                             
                             // 创建 ZIP 条目
                             java.util.zip.ZipEntry zipEntry = new java.util.zip.ZipEntry(relativePath);
