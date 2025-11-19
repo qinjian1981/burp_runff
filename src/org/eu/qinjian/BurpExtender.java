@@ -22,16 +22,23 @@ import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
 
 
 public class BurpExtender implements BurpExtension, HttpHandler {
-    private MontoyaApi api;
+    
+	private MontoyaApi api;
     private JPanel mainPanel;
+    
     private JTextField runffField;
     private JTextField runnerbarField;
     private JTextField photoplusField;
+    
     private JTextArea logArea;
     private static final String TARGET_URL_PATTERN = "/html/live/s\\d+\\.html";    
+    private ExecutorService executorService;
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -39,6 +46,9 @@ public class BurpExtender implements BurpExtension, HttpHandler {
         
         // 设置插件名称
         api.extension().setName("维生素、爱运动、跑野时刻 照片下载 极课错题生成");
+        
+        // 创建线程池用于后台下载
+        executorService = Executors.newFixedThreadPool(5); // 最大5个并发下载线程
         
         // 注册 HTTP 处理器
         api.http().registerHttpHandler(this);
@@ -74,7 +84,7 @@ public class BurpExtender implements BurpExtension, HttpHandler {
         mainPanel.add(scrollPane, BorderLayout.CENTER);
         
         // 添加自定义标签页
-        api.userInterface().registerSuiteTab("维生素、爱运动 照片下载 极课错题生成", mainPanel);
+        api.userInterface().registerSuiteTab("维生素、爱运动、跑野时刻 照片下载 ", mainPanel);
     }
 
     private void createSaveDirectory(String pathName,String folderName) {
@@ -104,7 +114,11 @@ public class BurpExtender implements BurpExtension, HttpHandler {
         try {
             host = new URL(url).getHost();
         } catch (Exception e) {
-            log("解析 URL 失败: " + e.getMessage());
+        	// 静默处理控制字符错误，不记录日志
+            if (!e.getMessage().contains("control char")) {
+                log("解析 URL 失败: " + e.getMessage());
+            }
+            return null;
         }
         
         // 处理维生素照片请求
@@ -134,7 +148,10 @@ public class BurpExtender implements BurpExtension, HttpHandler {
                 if (!number.isEmpty() && !number.equals("照片直播")) {
                     String response = responseReceived.bodyToString();
                     createSaveDirectory("runff",number);
-                    processXmlResponse_runff(response,number);//维生素
+                    // 创建final变量用于lambda表达式
+                    final String finalNumber = number;
+                    // 使用后台线程处理维生素照片
+                    executorService.submit(() -> processXmlResponse_runff(response, finalNumber));
                 }
             } catch (Exception e) {
                 log("解析请求体失败: " + e.getMessage());
@@ -160,7 +177,10 @@ public class BurpExtender implements BurpExtension, HttpHandler {
                 if (!gameNumber.isEmpty()) {
                     String response = responseReceived.bodyToString();
                     createSaveDirectory("runnerbar",gameNumber);
-                    processXmlResponse_runnerbar(response,gameNumber);//爱运动
+                    // 创建final变量用于lambda表达式
+                    final String finalGameNumber = gameNumber;
+                    // 使用后台线程处理爱运动照片
+                    executorService.submit(() -> processXmlResponse_runnerbar(response, finalGameNumber));
                 }
             } catch (Exception e) {
                 log("处理响应失败: " + e.getMessage());
@@ -186,7 +206,10 @@ public class BurpExtender implements BurpExtension, HttpHandler {
                 if (!Number.isEmpty()) {
                     String response = responseReceived.bodyToString();
                     createSaveDirectory("photoplus",Number);
-                    processJsonResponse_photoplus(response,Number);//跑野时刻
+                    // 创建final变量用于lambda表达式
+                    final String finalNumber = Number;
+                    // 使用后台线程处理跑野时刻照片
+                    executorService.submit(() -> processJsonResponse_photoplus(response, finalNumber));
                 }
             } catch (Exception e) {
                 log("处理响应失败: " + e.getMessage());
@@ -210,7 +233,6 @@ public class BurpExtender implements BurpExtension, HttpHandler {
 
     private void processXmlResponse_runff(String response,String number) {
         try {
-//            log("响应内容1: " + response);
             response = removeBom(response);
             log("维生素-响应内容: " + response);
             DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
@@ -222,17 +244,45 @@ public class BurpExtender implements BurpExtension, HttpHandler {
             Gson gson = new Gson();
             JsonArray jsonArray = gson.fromJson(listContent, JsonArray.class);
             log("维生素照片数量:"+jsonArray.size());
+            
+            // 使用CountDownLatch来等待所有图片下载完成
+            CountDownLatch latch = new CountDownLatch(jsonArray.size());
+            
             for (int i = 0; i < jsonArray.size(); i++) {
                 JsonObject photo = jsonArray.get(i).getAsJsonObject();
                 String bigUrl = photo.get("big").getAsString();
                 // 从 URL 中提取文件名
                 String fileName = bigUrl.substring(bigUrl.lastIndexOf('/') + 1);
                 String imageUrl = "http://p.chinarun.com" + bigUrl; // 需要替换为实际的域名
-                log(imageUrl);
-                downloadImage(imageUrl, "runff",number,fileName);
+                log("维生素图片url:"+imageUrl);
+                
+                // 为每张图片创建独立的下载任务
+                final int index = i;
+                final String finalImageUrl = imageUrl;
+                final String finalFileName = fileName;
+                executorService.submit(() -> {
+                    try {
+                        downloadImage(finalImageUrl, "runff", number, finalFileName);
+                        log("维生素图片 " + (index + 1) + "/" + jsonArray.size() + " 下载完成");
+                    } catch (Exception e) {
+                        log("维生素图片 " + (index + 1) + "/" + jsonArray.size() + " 下载失败: " + e.getMessage());
+                    } finally {
+                        latch.countDown();
+                    }
+                });
             }
-            log("维生素照片下载完成 准备生成压缩包");
-            createZipFile("runff",number);
+            
+            // 等待所有图片下载完成后创建压缩包
+            executorService.submit(() -> {
+                try {
+                    latch.await(); // 等待所有图片下载完成
+                    log("维生素照片下载完成 准备生成压缩包");
+                    createZipFile("runff", number);
+                } catch (InterruptedException e) {
+                    log("维生素压缩包创建被中断: " + e.getMessage());
+                    Thread.currentThread().interrupt();
+                }
+            });
             
         } catch (Exception e) {
         	log("解析 XML 失败: " + e.getMessage());
@@ -257,16 +307,42 @@ public class BurpExtender implements BurpExtension, HttpHandler {
             JsonArray photos = result.getAsJsonArray("topicInfoList");
             log("爱运动照片数量:" + photos.size());
             
+            // 使用CountDownLatch来等待所有图片下载完成
+            CountDownLatch latch = new CountDownLatch(photos.size());
+            
             for (int i = 0; i < photos.size(); i++) {
                 JsonObject photo = photos.get(i).getAsJsonObject();
                 String photoUrl = photo.get("url_hq").getAsString();
                 String fileName = photoUrl.substring(photoUrl.lastIndexOf('/') + 1);
-                log(photoUrl);
-                downloadImage(photoUrl, "runnerbar",number, fileName);
+                log("爱运动图片url:"+photoUrl);
+                
+                // 为每张图片创建独立的下载任务
+                final int index = i;
+                final String finalPhotoUrl = photoUrl;
+                final String finalFileName = fileName;
+                executorService.submit(() -> {
+                    try {
+                        downloadImage(finalPhotoUrl, "runnerbar", number, finalFileName);
+                        log("爱运动图片 " + (index + 1) + "/" + photos.size() + " 下载完成");
+                    } catch (Exception e) {
+                        log("爱运动图片 " + (index + 1) + "/" + photos.size() + " 下载失败: " + e.getMessage());
+                    } finally {
+                        latch.countDown();
+                    }
+                });
             }
             
-            log("爱运动照片下载完成 准备生成压缩包");
-            createZipFile("runnerbar",number);
+            // 等待所有图片下载完成后创建压缩包
+            executorService.submit(() -> {
+                try {
+                    latch.await(); // 等待所有图片下载完成
+                    log("爱运动照片下载完成 准备生成压缩包");
+                    createZipFile("runnerbar", number);
+                } catch (InterruptedException e) {
+                    log("爱运动压缩包创建被中断: " + e.getMessage());
+                    Thread.currentThread().interrupt();
+                }
+            });
             
         } catch (Exception e) {
             log("解析 JSON 失败: " + e.getMessage());
@@ -290,18 +366,42 @@ public class BurpExtender implements BurpExtension, HttpHandler {
             JsonArray photos = result.getAsJsonArray("pics_array");
             log("跑野时刻照片数量:" + photos.size());
             
+            // 使用CountDownLatch来等待所有图片下载完成
+            CountDownLatch latch = new CountDownLatch(photos.size());
+            
             for (int i = 0; i < photos.size(); i++) {
                 JsonObject photo = photos.get(i).getAsJsonObject();
                 String photoUrl = "https:"+photo.get("origin_img").getAsString();
-                String relate_time = photo.get("relate_time").getAsString();
                 String fileName = photo.get("pic_name").getAsString();
-//                String fileName = photoUrl.substring(photoUrl.lastIndexOf('/') + 1);
-                log(photoUrl);
-                downloadImage(photoUrl, "photoplus",number, fileName);
+                log("跑野时刻图片url:"+photoUrl);
+                
+                // 为每张图片创建独立的下载任务
+                final int index = i;
+                final String finalPhotoUrl = photoUrl;
+                final String finalFileName = fileName;
+                executorService.submit(() -> {
+                    try {
+                        downloadImage(finalPhotoUrl, "photoplus", number, finalFileName);
+                        log("跑野时刻图片 " + (index + 1) + "/" + photos.size() + " 下载完成");
+                    } catch (Exception e) {
+                        log("跑野时刻图片 " + (index + 1) + "/" + photos.size() + " 下载失败: " + e.getMessage());
+                    } finally {
+                        latch.countDown();
+                    }
+                });
             }
             
-            log("跑野时刻照片下载完成 准备生成压缩包");
-            createZipFile("photoplus",number);
+            // 等待所有图片下载完成后创建压缩包
+            executorService.submit(() -> {
+                try {
+                    latch.await(); // 等待所有图片下载完成
+                    log("跑野时刻照片下载完成 准备生成压缩包");
+                    createZipFile("photoplus", number);
+                } catch (InterruptedException e) {
+                    log("跑野时刻压缩包创建被中断: " + e.getMessage());
+                    Thread.currentThread().interrupt();
+                }
+            });
             
         } catch (Exception e) {
             log("解析 JSON 失败: " + e.getMessage());
@@ -316,10 +416,10 @@ public class BurpExtender implements BurpExtension, HttpHandler {
             
             try (java.io.InputStream in = url.openStream()) {
                 Files.copy(in, savePath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                log("成功下载图片: " + fileName);
+                // 日志在调用处处理，这里只专注于下载
             }
         } catch (Exception e) {
-            log("下载图片失败: " + fileName + " - " + e.getMessage());
+            throw new RuntimeException("下载图片失败: " + fileName + " - " + e.getMessage(), e);
         }
     }
 
@@ -384,20 +484,23 @@ public class BurpExtender implements BurpExtension, HttpHandler {
         try {
             // 确保日志消息使用UTF-8编码
             String encodedMessage = new String(message.getBytes("UTF-8"), "UTF-8");
-            logArea.append(encodedMessage + "\n");
-            // 滚动到最新内容
-            logArea.setCaretPosition(logArea.getDocument().getLength());
+            SwingUtilities.invokeLater(() -> {
+                logArea.append(encodedMessage + "\n");
+                // 滚动到最新内容
+                logArea.setCaretPosition(logArea.getDocument().getLength());
+            });
         } catch (Exception e) {
             // 如果编码转换失败，直接输出原始消息
-            logArea.append(message + "\n");
-            // 滚动到最新内容
-            logArea.setCaretPosition(logArea.getDocument().getLength());
+            SwingUtilities.invokeLater(() -> {
+                logArea.append(message + "\n");
+                // 滚动到最新内容
+                logArea.setCaretPosition(logArea.getDocument().getLength());
+            });
         }
     }
     
     public static void main(String[] args){
-
-
+        // 测试用
     }
 	
 } 
